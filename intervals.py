@@ -104,25 +104,47 @@ class TrayApp:
         self.client = client
         self.icon_path = icon_path
         self.icon = None
+        self._stats_window = None
+        self._last_click = 0  # track last click time
 
     def _show_popup(self):
+        if self._stats_window and self._stats_window.winfo_exists():
+            self._stats_window.lift()
+            return
+
         root = Tk()
+        self._stats_window = root
         root.title("Intervals Stats")
         root.geometry("230x180")
         apply_window_icon(root)
+
         stats = self.client.fetch_today_stats()
         label = Label(root, text=stats, justify="left", font=("Consolas", 10))
         label.pack(padx=10, pady=10)
+
+        def on_close():
+            self._stats_window = None
+            root.destroy()
+        root.protocol("WM_DELETE_WINDOW", on_close)
+
         root.mainloop()
 
     def _refresh_loop(self):
         while True:
-            self.icon.title = self.client.fetch_today_stats()
+            if self.icon:
+                self.icon.title = self.client.fetch_today_stats()
             time.sleep(REFRESH_INTERVAL)
 
     def refresh_stats(self):
         if self.icon:
             self.icon.title = self.client.fetch_today_stats()
+
+    def _on_click(self, icon, item=None):
+        # detect double click: two clicks within 0.4s
+        now = time.time()
+        if now - self._last_click < 0.4:
+            threading.Thread(target=self._show_popup, daemon=True).start()
+        self._last_click = now
 
     def run(self):
         try:
@@ -133,11 +155,15 @@ class TrayApp:
 
         settings_window = SettingsWindow(self.client, self)
 
-        self.icon = Icon("Intervals", tray_image, menu=Menu(
-            MenuItem("Stats", lambda: threading.Thread(target=self._show_popup, daemon=True).start()),
-            MenuItem("Settings", lambda: threading.Thread(target=settings_window.show, daemon=True).start()),
-            MenuItem("Exit", lambda icon: icon.stop())
-        ))
+        self.icon = Icon(
+            "Intervals",
+            tray_image,
+            menu=Menu(
+                MenuItem("Stats", self._on_click, default=True),
+                MenuItem("Settings", lambda: threading.Thread(target=settings_window.show, daemon=True).start()),
+                MenuItem("Exit", lambda icon: icon.stop())
+            )
+        )
 
         threading.Thread(target=self._refresh_loop, daemon=True).start()
         self.icon.run()

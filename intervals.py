@@ -1,17 +1,17 @@
+import wx
+import wx.adv
+import threading
 import requests
 import json
 import os
-import threading
 import time
 from datetime import date
-from tkinter import Tk, Label, Entry, Button, StringVar
-from pystray import Icon, MenuItem, Menu
-from PIL import Image
 
-# Configuration
-ICON_PATH = 'intervals.ico'
-REFRESH_INTERVAL = 600  # seconds
+ICON_PATH = "intervals.ico"
 SETTINGS_FILE = "settings.json"
+REFRESH_INTERVAL = 600  # seconds
+
+APP_ICON = None  # Will be initialized after wx.App is created
 
 def load_settings():
     defaults = {"username": "API_KEY", "password": "", "athlete_id": "0"}
@@ -38,12 +38,6 @@ def save_settings(username, password, athlete_id):
             }, f)
     except Exception as e:
         print(f"Failed to save settings: {e}")
-
-def apply_window_icon(window):
-    try:
-        window.iconbitmap(ICON_PATH)
-    except Exception as e:
-        print(f"Failed to set window icon: {e}")
 
 class IntervalsClient:
     def __init__(self, username, password, athlete_id):
@@ -99,115 +93,104 @@ class IntervalsClient:
             f"Steps: {steps}"
         )
 
-class TrayApp:
-    def __init__(self, client: IntervalsClient, icon_path: str):
+class TrayApp(wx.adv.TaskBarIcon):
+    def __init__(self, client):
+        super().__init__()
         self.client = client
-        self.icon_path = icon_path
-        self.icon = None
+        self.SetIcon(APP_ICON, "Intervals")
+        self.Bind(wx.adv.EVT_TASKBAR_LEFT_DCLICK, self.on_double_click)
+        self.Bind(wx.adv.EVT_TASKBAR_RIGHT_UP, self.on_right_click)
         self._stats_window = None
-        self._last_click = 0  # track last click time
+        self._settings_window = None
+        self._start_refresh_thread()
 
-    def _show_popup(self):
-        if self._stats_window and self._stats_window.winfo_exists():
-            self._stats_window.lift()
+    def CreatePopupMenu(self):
+        menu = wx.Menu()
+        stats_item = menu.Append(wx.ID_ANY, "Stats")
+        settings_item = menu.Append(wx.ID_ANY, "Settings")
+        exit_item = menu.Append(wx.ID_EXIT, "Exit")
+        self.Bind(wx.EVT_MENU, lambda evt: self.show_stats(), stats_item)
+        self.Bind(wx.EVT_MENU, lambda evt: self.show_settings(), settings_item)
+        self.Bind(wx.EVT_MENU, lambda evt: wx.CallAfter(wx.GetApp().ExitMainLoop), exit_item)
+        return menu
+
+    def on_double_click(self, event):
+        self.show_stats()
+
+    def on_right_click(self, event):
+        self.PopupMenu(self.CreatePopupMenu())
+
+    def show_stats(self):
+        if self._stats_window and self._stats_window.IsShown():
+            self._stats_window.Raise()
             return
 
-        root = Tk()
-        self._stats_window = root
-        root.title("Intervals Stats")
-        root.geometry("230x180")
-        apply_window_icon(root)
-
         stats = self.client.fetch_today_stats()
-        label = Label(root, text=stats, justify="left", font=("Consolas", 10))
-        label.pack(padx=10, pady=10)
+        self._stats_window = wx.Frame(None, title="Intervals Stats", size=(260, 220))
+        self._stats_window.SetIcon(APP_ICON)
+        panel = wx.Panel(self._stats_window)
+        text = wx.StaticText(panel, label=stats, style=wx.ALIGN_LEFT)
+        font = wx.Font(10, wx.FONTFAMILY_TELETYPE, wx.FONTSTYLE_NORMAL, wx.FONTWEIGHT_NORMAL)
+        text.SetFont(font)
+        sizer = wx.BoxSizer(wx.VERTICAL)
+        sizer.Add(text, 1, wx.ALL | wx.EXPAND, 10)
+        panel.SetSizer(sizer)
+        self._stats_window.Show()
 
-        def on_close():
-            self._stats_window = None
-            root.destroy()
-        root.protocol("WM_DELETE_WINDOW", on_close)
+    def show_settings(self):
+        if self._settings_window and self._settings_window.IsShown():
+            self._settings_window.Raise()
+            return
 
-        root.mainloop()
+        self._settings_window = wx.Frame(None, title="Settings", size=(300, 250))
+        self._settings_window.SetIcon(APP_ICON)
+        panel = wx.Panel(self._settings_window)
 
-    def _refresh_loop(self):
-        while True:
-            if self.icon:
-                self.icon.title = self.client.fetch_today_stats()
-            time.sleep(REFRESH_INTERVAL)
+        vbox = wx.BoxSizer(wx.VERTICAL)
 
-    def refresh_stats(self):
-        if self.icon:
-            self.icon.title = self.client.fetch_today_stats()
+        def add_field(label, value):
+            vbox.Add(wx.StaticText(panel, label=label), 0, wx.TOP | wx.LEFT, 10)
+            field = wx.TextCtrl(panel, value=value)
+            vbox.Add(field, 0, wx.EXPAND | wx.LEFT | wx.RIGHT, 10)
+            return field
 
-    def _on_click(self, icon, item=None):
-        # detect double click: two clicks within 0.4s
-        now = time.time()
-        if now - self._last_click < 0.4:
-            threading.Thread(target=self._show_popup, daemon=True).start()
-        self._last_click = now
+        user_field = add_field("Username:", self.client.username)
+        pass_field = add_field("API Key:", self.client.password)
+        id_field = add_field("Athlete ID:", self.client.athlete_id)
 
-    def run(self):
-        try:
-            tray_image = Image.open(self.icon_path)
-        except Exception as e:
-            print(f"Failed to load tray icon: {e}")
-            tray_image = Image.new("RGB", (64, 64), color="gray")
-
-        settings_window = SettingsWindow(self.client, self)
-
-        self.icon = Icon(
-            "Intervals",
-            tray_image,
-            menu=Menu(
-                MenuItem("Stats", self._on_click, default=True),
-                MenuItem("Settings", lambda: threading.Thread(target=settings_window.show, daemon=True).start()),
-                MenuItem("Exit", lambda icon: icon.stop())
-            )
-        )
-
-        threading.Thread(target=self._refresh_loop, daemon=True).start()
-        self.icon.run()
-
-class SettingsWindow:
-    def __init__(self, client: IntervalsClient, app: TrayApp):
-        self.client = client
-        self.app = app
-
-    def show(self):
-        root = Tk()
-        root.title("Settings")
-        root.geometry("300x250")
-        apply_window_icon(root)
-
-        Label(root, text="Username:").pack(pady=(10, 0))
-        api_var = StringVar(value=self.client.username)
-        Entry(root, textvariable=api_var, width=40).pack()
-
-        Label(root, text="API Key:").pack(pady=(10, 0))
-        pass_var = StringVar(value=self.client.password)
-        Entry(root, textvariable=pass_var, width=40).pack()
-
-        Label(root, text="Athlete ID:").pack(pady=(10, 0))
-        athlete_var = StringVar(value=self.client.athlete_id)
-        Entry(root, textvariable=athlete_var, width=40).pack()
-
-        def save():
-            self.client.username = api_var.get()
-            self.client.password = pass_var.get()
-            self.client.athlete_id = athlete_var.get()
+        def on_save(event):
+            self.client.username = user_field.GetValue()
+            self.client.password = pass_field.GetValue()
+            self.client.athlete_id = id_field.GetValue()
             save_settings(self.client.username, self.client.password, self.client.athlete_id)
-            self.app.refresh_stats()
-            root.destroy()
+            self._settings_window.Close()
 
-        Button(root, text="Save", command=save).pack(pady=20)
-        root.mainloop()
+        save_btn = wx.Button(panel, label="Save")
+        save_btn.Bind(wx.EVT_BUTTON, on_save)
+        vbox.Add(save_btn, 0, wx.ALL | wx.ALIGN_CENTER, 15)
+
+        panel.SetSizer(vbox)
+        self._settings_window.Show()
+
+    def _start_refresh_thread(self):
+        def loop():
+            while True:
+                stats = self.client.fetch_today_stats()
+                tooltip = stats.replace("\n", "\n ")
+                self.SetIcon(APP_ICON, tooltip)
+                time.sleep(REFRESH_INTERVAL)
+        threading.Thread(target=loop, daemon=True).start()
+
+class App(wx.App):
+    def OnInit(self):
+        global APP_ICON
+        APP_ICON = wx.Icon(ICON_PATH, wx.BITMAP_TYPE_ICO)
+
+        settings = load_settings()
+        client = IntervalsClient(settings["username"], settings["password"], settings["athlete_id"])
+        self.tray = TrayApp(client)
+        return True
 
 if __name__ == "__main__":
-    settings = load_settings()
-    client = IntervalsClient(
-        settings["username"],
-        settings["password"],
-        settings["athlete_id"]
-    )
-    app = TrayApp(client, ICON_PATH)
-    app.run()
+    app = App(False)
+    app.MainLoop()
